@@ -1,0 +1,269 @@
+FEWSHOT_EXAMPLES = """DEFINITIONS (From the maintainer’s perspective this is how classification would be done)
+INTRINSIC — Root cause is inside THIS repo; maintainers would fix it by changing this codebase. Includes:
+• Logic/validation/exception/flow errors in our source
+• Our migrations/SQL/schema/scripts are wrong or incomplete
+• Runtime misbehavior from our modules
+• Regression tied to our commit
+• We misuse an external API relative to its current contract/spec
+• Transformation tools (formatters/linters/transpilers): for given inputs/config, output deviates from intended behavior or style under that config
+• Incorrect configs/code we provide that trigger dependency/toolchain bugs (dependency behaves correctly given our bad input)
+
+EXTRINSIC — Root cause is OUTSIDE this repo but manifests as failures here; fix is to adapt to an external change/context. Includes:
+• Dependency/driver/service/DB/OS/runtime upgrades or policy changes
+• Engine/platform rules (database enum/collation/encoding, filesystem/policy)
+• Upstream API removals/deprecations; import/behavior moved by a dependency
+• Parser/formatter/linter output changes due to upstream dependency behavior changes (our config correct)
+• Test failures only after dependency/platform update where production code is correct
+• Typically no bug-inducing commit in THIS repo when first observed
+
+NOT A BUG — Not a defect in THIS package. Includes:
+• User application/integration misuse; unmet documented preconditions
+• Tests/CI artifacts; brittle fixtures/mocks; misfiled/unsupported
+• Operator misconfiguration; questions/support; enhancements/wishlist
+• Documentation/test expectation wrong while runtime behavior is intended
+• Build tools: build/pack succeeds and the failure is a runtime error in USER app files/components
+• Consumer build tools/minifiers: consumer tool fails to process our package due to its own ES/compat limits while our package is correct
+• Failures caused by consumer-provided config that violates documented requirements
+
+UNKNOWN — Insufficient/unintelligible info (no repro/versions/logs; “cannot reproduce”; very sparse or non-technical).
+
+DECISION FRAMEWORK (reason considering all definitions do not keyword-match as a solution.)
+1) If tests/CI, user misuse, operator misconfig, docs/expectation error, question, enhancement, or misfiled/unsupported → Not a Bug.
+   • Build tools: build/pack succeeds + runtime error in user app code → Not a Bug.
+   • Failures caused by consumer-provided config that breaks documented requirements → Not a Bug.
+2) Change & Causality — Decide root cause location by principle (not keywords):
+    • If a real defect exists, ask where the failure originates.
+    • External-change precedence: When the report clearly ties onset to an external change (dependency/driver/runtime/OS/service/toolchain) and there’s no corresponding change or misuse in THIS repo, prefer Extrinsic.
+    • Locus rule: When the first failing frame, error path, or failure surface lives outside this project’s namespace (e.g., vendor libs, system drivers, hosted services), treat it as Extrinsic unless there is clear misuse of that API/contract in our code.
+    • Contract rule: If our code violates a current external API/spec (wrong params, removed behavior, invalid assumptions), it is Intrinsic even if the stack trace passes through dependencies.
+    • Misuse override: If the behavior stems from user/consumer misconfiguration or use that contradicts documented requirements, it is Not a Bug, not Extrinsic.
+3) Databases:
+   • Pure engine/compat requirement (e.g., Postgres ENUM naming rule) → Extrinsic.
+   • Our migration/SQL/schema/script is logically wrong or missing a step → Intrinsic.
+4) External APIs:
+   • We violate the current contract/spec → Intrinsic.
+   • Upstream removed/deprecated behavior; our adaptation is pending (no misuse) → Extrinsic.
+5) Test Failures:
+   • Caused by brittle mocks, missing fixtures, outdated expectations → Not a Bug.
+   • Caused by wrong production code → Intrinsic.
+   • Caused only by external changes with production code correct → Extrinsic.
+6) Build Toolchain & Parsers — Classify by who is wrong:
+    • Our incorrect config/code causes a downstream tool to fail (the tool behaves correctly given our input) → Intrinsic.
+    • A downstream tool/dependency misbehaves while our config/code is valid and within documented contracts → Extrinsic.
+    • A consumer’s build/minifier fails to process otherwise valid code we publish (their limitation) → Not a Bug.
+7) Information sufficiency & bias checks:
+   • If no reproducible steps, missing logs/versions, or report is too vague for a maintainer to reasonably locate the cause, choose Unknown — even if the wording is technical.
+   • Do not let technical terminology bias toward Intrinsic unless the causal chain clearly matches the Intrinsic definition.
+   • Uncertainty preference: When evidence is evenly balanced between Intrinsic and Extrinsic (or still ambiguous), choose Unknown over guessing Intrinsic.
+8) If still genuinely insufficient understanding Unknown. Prefer Intrinsic/Extrinsic when a reasonable maintainer could infer the root location.
+
+REASONING FORMAT (Use Multiple steps for reasoning.)
+Reasoning:
+1) Triage Gate — Is this Not a Bug (tests/CI, misuse, operator config, docs/expectation, enhancement, consumer tooling limits)?
+2) Change & Causality — Any “after/since upgrade” or external bump? Any commit/bisect pointing to our repo?
+3) Root Location — Internal code or external system? Are we violating a current contract/spec?
+4) Domain Rule — DB engine rule vs our migration/SQL; external API deprecation vs misuse.
+5) Build/Toolchain/Test — Our bad config/code vs external tool bug; test artifact vs production defect.
+6) Information Check — Is info sufficient? If insufficient/contradictory, call Unknown.
+Confidence: High/Medium/Low (brief note)
+
+### Example 1  
+**Bug Project:** nova  
+**Bug Title:** “IPMI power manager hangs when the password is not set”  
+**Bug Description:** While creating Baremetal Node by `nova baremetal-node-create --pm_user ADMIN --pm_address <IP> --pm_type ipmi`, the nova-compute service hangs. The BMC responds to pings, but nova-compute blocks because no IPMI password was provided.  
+**Step-by-step:**  
+1. The IPMI driver path in Nova requires credentials to talk to the BMC over RMCP.  
+2. Missing `pm_password` isn’t validated; code proceeds and waits on an auth path that can never succeed.  
+3. The hang is caused by absent precondition checks and poor exception handling in Nova’s IPMI power manager.  
+4. Fix requires adding validation + early failure messaging inside Nova’s driver before attempting BMC calls.  
+**Final Answer:** Intrinsic  
+
+### Example 2  
+**Bug Project:** nova  
+**Bug Title:** “There is not any API sample file for ‘unshelve’”  
+**Bug Description:** There’s no API sample file for the `unshelve` action; request is to add one for consistency and testing docs.  
+**Step-by-step:**  
+1. This is a request to add an API sample/artifact to improve docs/test coverage.  
+2. No incorrect runtime behavior or logic defect is reported.  
+3. Production behavior is intact; task is documentation/test asset work.  
+4. No code fix to Nova’s runtime is required.  
+**Final Answer:** Not a Bug  
+
+### Example 3  
+**Bug Project:** neutron  
+**Bug Title:** “OVS L2 agent fails after kernel upgrade to 5.x”  
+**Bug Description:** After upgrading the host kernel to 5.x, `neutron-openvswitch-agent` logs flow programming failures; `ovs-vswitchd` reports kernel module mismatch.  
+**Step-by-step:**  
+1. Neutron’s OVS agent depends on the Open vSwitch kernel datapath (`openvswitch.ko`) matching userspace.  
+2. Kernel upgrade changed ABI; the installed OVS kernel module/userspace combo is incompatible.  
+3. Neutron code is issuing standard `ovs-ofctl`/OVSDB operations; failures originate in the platform/driver layer.  
+4. Resolution is to align OVS module/userspace with the new kernel (rebuild/reinstall), not to change Neutron’s logic.  
+**Final Answer:** Extrinsic  
+
+### Example 4  
+**Bug Project:** neutron  
+**Bug Title:** “Creating security group rule without protocol raises KeyError”  
+**Bug Description:** Creating a security group rule without specifying `protocol` yields a server error and traceback (`KeyError: 'protocol'`).  
+**Step-by-step:**  
+1. API allows omitting protocol (defaults should apply or validation should reject cleanly).  
+2. Neutron’s server-side validation/normalization path assumes `protocol` exists and accesses it unguarded.  
+3. This is a missing validation/branch in Neutron’s own request handling.  
+4. Fix is to add validation/defaulting in Neutron API code and return 400 if invalid, not a server error.  
+**Final Answer:** Intrinsic  
+
+### Example 5  
+**Bug Project:** cinder  
+**Bug Title:** “Volume create stuck when LVM volume group is missing”  
+**Bug Description:** Creating a volume on the LVM backend with a non-existent VG leaves the volume in `creating` forever; logs show `vgdisplay` not found or empty.  
+**Step-by-step:**  
+1. Cinder’s LVM driver relies on a configured VG existing on the host (e.g., `cinder-volumes`).  
+2. The driver path attempts `lvcreate` without pre-checking VG presence, then retries endlessly on errors.  
+3. Missing precondition check and error handling are in Cinder’s own driver code.  
+4. Fix is to validate VG existence before create and fail fast with a clear error.  
+**Final Answer:** Intrinsic  
+
+### Example 6  
+**Bug Project:** cinder  
+**Bug Title:** “DB migration fails on MariaDB due to reserved keyword column name”  
+**Bug Description:** Upgrading schema fails with SQL syntax error; migration creates a column named `rank` without quoting, which is reserved under current SQL mode.  
+**Step-by-step:**  
+1. Alembic migration script is authored in this repo; it generates SQL that must be portable (MySQL/MariaDB/Percona).  
+2. The failure is caused by our migration using a reserved identifier without quoting/renaming.  
+3. This is a defect in our migration logic, not a DB engine policy change mid-flight.  
+4. Fix is to alter the migration (rename/quote) and add compatibility tests.  
+**Final Answer:** Intrinsic  
+
+### Example 7  
+**Bug Project:** glance  
+**Bug Title:** “Uploads to Swift intermittently 401 due to time skew”  
+**Bug Description:** Glance using Swift as a backend returns 401 from Swift for tempurls; only occurs on some controllers; `ntp` not consistently running.  
+**Step-by-step:**  
+1. Swift tempurl signatures depend on consistent wall-clock time between Glance node and Swift proxy.  
+2. Missing/failed NTP leads to timestamp drift; otherwise-valid signatures appear invalid to Swift.  
+3. Glance code is issuing correct requests; the authentication failure is due to infrastructure time sync.  
+4. Remediation is to restore time sync on controllers; no code changes to Glance required.  
+**Final Answer:** Extrinsic  
+
+### Example 8  
+**Bug Project:** glance  
+**Bug Title:** “Glance allows upload with negative image size; later crashes on serve”  
+**Bug Description:** Client specifies invalid size metadata; Glance accepts it, then a later path crashes computing range responses.  
+**Step-by-step:**  
+1. API layer should validate numeric fields (size ≥ 0) at create/update time.  
+2. Acceptance of invalid metadata indicates missing validation and error handling in Glance’s API.  
+3. Subsequent crash is a symptom of the earlier validation bug.  
+4. Fix is to add strict validation in Glance and reject invalid sizes with a 400.  
+**Final Answer:** Intrinsic  
+
+### Example 9  
+**Bug Project:** swift  
+**Bug Title:** “Object replication fails on XFS due to xattrs disabled”  
+**Bug Description:** Swift replicator logs show errors reading extended attributes; the filesystem was mounted without xattrs.  
+**Step-by-step:**  
+1. Swift relies on filesystem extended attributes (xattrs) for metadata and replication bookkeeping.  
+2. The storage node’s FS mount options disable xattrs; Swift processes can’t read/write required metadata.  
+3. Swift code is behaving correctly; the environment violates documented requirements.  
+4. Resolution is to remount with xattrs enabled; no Swift code change needed.  
+**Final Answer:** Extrinsic  
+
+### Example 10  
+**Bug Project:** swift  
+**Bug Title:** “Erasure-coded object HEAD returns 404 in unit test”  
+**Bug Description:** A unit test expects 200 for a HEAD on a partially-written EC object; production behavior and spec say 404 until quorum write completes.  
+**Step-by-step:**  
+1. The failing path is a test artifact: expectation contradicts documented behavior.  
+2. Runtime complies with Swift’s consistency model for EC fragments.  
+3. Fix is to correct the test expectation and/or fixture setup.  
+4. No production code change required.  
+**Final Answer:** Not a Bug  
+
+### Example 11  
+**Bug Project:** nova  
+**Bug Title:** “Libvirt driver fails to attach SR-IOV VF after package updates”  
+**Bug Description:** After updating host packages, `virsh attach-device` from Nova/libvirt driver fails with `operation not supported`; kernel shows `ixgbevf` driver mismatch.  
+**Step-by-step:**  
+1. SR-IOV passthrough hinges on host kernel NIC drivers, IOMMU, and libvirt capabilities.  
+2. Package update changed kernel/driver ABI; VF capabilities no longer match libvirt expectations.  
+3. Nova issues standard libvirt XML; the failure is in host driver/libvirt capability mismatch.  
+4. Corrective action is driver/libvirt stack alignment, not a Nova code change.  
+**Final Answer:** Extrinsic  
+
+### Example 12  
+**Bug Project:** nova  
+**Bug Title:** “Intermittent snapshot failures with no logs”  
+**Bug Description:** Users report “sometimes snapshot fails”; no version info, no stack traces, no steps, and maintainers cannot reproduce.  
+**Step-by-step:**  
+1. The report is sparse: missing versions, backend (Ceph/NFS), and exact API path.  
+2. No causal phrasing (no ‘after upgrade’/‘since commit’), no reproducible case.  
+3. Both internal (Nova/libvirt) and external (storage driver) causes are plausible.  
+4. Insufficient information to reasonably localize the root cause.  
+**Final Answer:** Unknown  
+
+### Example 13
+**Bug Project:** rollup
+**Bug Title:** “Build crashes after upgrading to Node 20; stack in node_modules/enhanced-resolve”
+**Bug Description:** Works on Node 18; immediately fails on Node 20 with error originating in node_modules/enhanced-resolve/.... No local changes.
+**Step-by-step:**
+1. Onset is tied to a runtime upgrade with no repo change.
+2. The failing locus is outside project namespace.
+3. No misuse of the dependency is indicated; same config worked on Node 18.
+4. This is adapting to an external environment change.
+
+**Final Answer:** Extrinsic
+
+### Example 14
+**Bug Project:** webpack plugin
+**Bug Title:** “Option minify doesn’t work; using --no-minfiy causes error”
+**Bug Description:** User passed --no-minfiy (typo). Works with --no-minify.
+**Step-by-step:**
+1. Failure due to user flag typo contradicting documented interface.
+2. Runtime behaves as designed when used correctly.
+3. Not a defect in this repo.
+Final Answer: Not a Bug
+
+### Example 15
+**Bug Project:** service client
+**Bug Title:** “400 error after upstream removes v1/search endpoint”
+**Bug Description:** Upstream changelog: v1/search removed; use v2/query. Our client still calls v1/search.
+**Step-by-step:**
+1. Upstream removed behavior; our client hasn’t adapted yet.
+2. Our calls respect prior contract; no misuse of current contract is shown, just outdated integration.
+3. Requires adapting to an external API change.
+Final Answer: Extrinsic
+
+### Example 16
+**Bug Project:** babel plugin
+**Bug Title:** “Build fails after upgrading to Babel 8; plugin option loose=true ignored”
+**Bug Description:** Worked on Babel 7. After upgrading to 8, same config throws “unknown option”.
+**Step-by-step:**
+1. Onset aligns with dependency major upgrade.
+2. The option was removed in Babel 8 (current contract changed).
+3. Our use matched prior contract; no misuse of current contract is shown.
+4. Requires adapting to the new plugin option schema.
+Final Answer: Extrinsic
+
+### Example 17
+**Bug Project:** webpack loader
+**Bug Title:** “Loader crashes on consumer project using ES2023 syntax”
+**Bug Description:** Consumer bundler fails parsing our published ESM even though we transpile per documented target; consumer’s minifier can’t parse #private.
+**Step-by-step:**
+1. Our package meets its documented compatibility target.
+2. Failure is in consumer tool limitation.
+3. No change required in our repo.
+4. This is a consumer environment constraint.
+Final Answer: Not a Bug
+
+### Example 18
+**Bug Project:** http client
+**Bug Title:** “TLS handshake fails after CA rotation by vendor”
+**Bug Description:** Started the same day vendor rotated intermediate CA; our pinned bundle outdated.
+**Step-by-step:**
+1. Root cause is external PKI change.
+2. Our client uses standard TLS correctly; no misuse.
+3. Requires updating trust store or pin set.
+4. Production code change is an adaptation to external infra.
+Final Answer: Extrinsic
+
+Output your step by step reasoning in the format above and end with:
+Final Answer:  <Intrinsic/Extrinsic/Not a Bug/Unknown>
+"""

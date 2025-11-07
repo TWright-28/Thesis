@@ -12,34 +12,71 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 import requests
 import argparse
-
+import re
+import unicodedata
+from typing import Optional
 
 class HarmonyResponseParser:
-    """Parser for Harmony response format"""
-    
+    """Parser for Harmony response format with markdown/HTML tolerance."""
+
+    _CANON = {
+        "intrinsic": "Intrinsic",
+        "extrinsic": "Extrinsic",
+        "not a bug": "Not a Bug",
+        "unknown": "Unknown",
+    }
+
+    @staticmethod
+    def _normalize_text(s: str) -> str:
+        # Unicode normalize, collapse weird spaces, and strip zero-width chars
+        s = unicodedata.normalize("NFKC", s)
+        s = s.replace("\u200b", "").replace("\ufeff", "")
+        return s
+
     @staticmethod
     def extract_label(text: str) -> Optional[str]:
-        """Extract classification label from text"""
-        # Look for "Final Answer: <label>"
-        pattern = r'Final\s+Answer\s*:\s*(Intrinsic|Extrinsic|Not\s+a\s+Bug|Unknown)'
-        
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            label = match.group(1).strip()
-            if re.match(r'not\s+a\s+bug', label, re.IGNORECASE):
-                return "Not a Bug"
-            return label.title()
-        
-        return None
-    
+        """
+        Match patterns like:
+          **Final Answer:** Intrinsic
+          Final answer -  `Extrinsic`
+          Final Answer — <b>Not a Bug</b>.
+        """
+        if not text:
+            return None
+
+        t = HarmonyResponseParser._normalize_text(text)
+
+        # Regex:
+        #   - 'final answer' (case/space tolerant)
+        #   - separator: colon or dash variants [: - – —]
+        #   - optional junk formatting: markdown/HTML/backticks/underscores/asterisks/spaces
+        #   - capture the label words, possibly with punctuation after
+        pat = re.compile(
+            r"final\s*answer\s*[:\-–—]\s*(?:\*|`|_|\s|</?[^>]+>)*"
+            r"(intrinsic|extrinsic|not\s*[-\s_]*a\s*[-\s_]*bug|unknown)\b",
+            re.IGNORECASE,
+        )
+
+        matches = list(pat.finditer(t))
+        if not matches:
+            return None
+
+        raw = matches[-1].group(1)  # take the last occurrence
+        norm = re.sub(r"[\s\-_]+", " ", raw.strip().lower())
+
+        return HarmonyResponseParser._CANON.get(norm, None)
+
     @staticmethod
     def extract_reasoning(text: str) -> str:
-        """Extract reasoning from response (everything before Final Answer)"""
-        # Try to find content before "Final Answer:"
-        match = re.search(r'(.+?)Final\s+Answer\s*:', text, re.DOTALL | re.IGNORECASE)
-        if match:
-            return match.group(1).strip()
-        return ""
+        """Everything before the LAST 'Final Answer' marker."""
+        if not text:
+            return ""
+        t = HarmonyResponseParser._normalize_text(text)
+        # find last index of a Final Answer marker (accepting : - – —)
+        m = list(re.finditer(r"final\s*answer\s*[:\-–—]", t, re.IGNORECASE))
+        if not m:
+            return t.strip()
+        return t[: m[-1].start()].strip()
 
 
 def call_ollama(prompt: str, model: str = "gpt-oss:20b", temperature: float = 0.2, max_tokens: int = 8192) -> str:
@@ -68,16 +105,11 @@ def format_issue_prompt(issue: Dict[str, Any], fewshot_examples: str, reasoning_
     project = f"{issue['owner']}/{issue['repo']}"
     title = issue.get('title', 'No title')
     body = issue.get('body', 'No description')
-    
+    created_at = issue.get('created_at')
     # Extract author information
     author_info = issue.get('author', {})
     author_name = author_info.get('username', 'Unknown') if author_info else 'Unknown'
     author_role = author_info.get('author_association', 'NONE') if author_info else 'NONE'
-    
-    # Extract labels
-    labels = issue.get('labels', [])
-    label_names = [label.get('name', '') for label in labels if label.get('name')]
-    labels_str = ', '.join(label_names) if label_names else 'None'
     
     # Extract closing information
     closed_by = issue.get('closed_by')
@@ -126,8 +158,8 @@ def format_issue_prompt(issue: Dict[str, Any], fewshot_examples: str, reasoning_
 **Bug Project:** {project}
 **Bug Title:** {title}
 **Issue Author:** {author_name} (Role: {author_role})
-**Labels:** {labels_str}
 **Resolution:** {resolution_str}
+**Issue Creation Date:** {created_at}
 
 **Bug Description:**
 {body}
